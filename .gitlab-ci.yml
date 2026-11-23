@@ -1,0 +1,54 @@
+stages:
+  - lint
+  - test
+
+default:
+  image: python:3.12-slim
+  cache:
+    key: pip-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cache/pip
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  # Settings are built at import; this lets alembic/ruff/mypy load the app
+  # without a .env. Never reuse this value outside CI.
+  JWT_SECRET: "ci-only-secret-0123456789abcdefghijklmnopqrstuvwxyz"
+
+lint:
+  stage: lint
+  script:
+    - pip install -e ".[dev]"
+    - ruff check .
+    - ruff format --check .
+    - mypy src
+    # Exactly one Alembic head (same guard as the service repos).
+    - alembic heads
+    - test "$(alembic heads | grep -c .)" -eq 1
+
+test:
+  stage: test
+  script:
+    - pip install -e ".[dev]"
+    # Tests use SQLite + fakeredis, so no services are needed. Add postgres/redis
+    # services here when you start testing against the real thing.
+    - pytest -q
+
+# The test suite runs on SQLite; this job proves the migrations themselves work
+# on the database you deploy, and that models and migrations have not drifted.
+migrations:
+  stage: test
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: app
+    DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/app
+  script:
+    - pip install -e ".[dev]"
+    - alembic upgrade head
+    - alembic check
+    - alembic downgrade base
+    - alembic upgrade head

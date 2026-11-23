@@ -1,0 +1,52 @@
+# Prometheus alerting rules for this service.
+#
+# Load alongside your scrape config, e.g.:
+#   rule_files:
+#     - /etc/prometheus/rules/app-alerts.yml
+# On Kubernetes, wrap the same expressions in a PrometheusRule CRD.
+#
+# Both checks below fail open when Redis is unreachable: the API keeps
+# serving, but revocation and abuse control are off. These alerts are the
+# only signal that "protected" became "best effort".
+
+groups:
+  - name: fastapi-boilerplate.security
+    rules:
+      - alert: RevocationCheckFailing
+        # Any sustained fail-open: tokens cannot be revoked right now.
+        expr: rate(revocation_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Token revocation is failing open (Redis unreachable)"
+          description: >-
+            Revocation checks (logout denylist / not_before) have been failing
+            for 5 minutes. Logout and demotion no longer invalidate live tokens.
+            Check Redis availability and connectivity from the API pods.
+          runbook_url: "docs/SECURITY.md#revocation"
+
+      - alert: RevocationFailuresSpike
+        # A burst, even if it recovers before the `for` window above fires.
+        expr: increase(revocation_failures_total[10m]) > 50
+        labels:
+          severity: warning
+        annotations:
+          summary: "Burst of revocation fail-open events"
+          description: >-
+            More than 50 revocation checks failed open in 10 minutes. If Redis
+            was not actually down, suspect a network policy or pool exhaustion
+            between the API and Redis.
+
+      - alert: RateLimitUnavailable
+        expr: rate(ratelimit_failures_total[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rate limiting is failing open (Redis unreachable)"
+          description: >-
+            Login/register/admin-login limits have been skipped for 10 minutes.
+            Brute force protection is off; consider ingress-level limits until
+            Redis is healthy.
+          runbook_url: "docs/SECURITY.md#rate-limiting-and-abuse"

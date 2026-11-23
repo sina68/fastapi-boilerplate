@@ -1,0 +1,94 @@
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/app
+  REDIS_URL: redis://redis:6379/0
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    env_file: .env
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    # No curl in the slim image; hit the dependency-free liveness probe.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/liveness', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Same image, different command: migrations are the API's job (RUN_MIGRATIONS=0).
+  worker:
+    build: .
+    env_file: .env
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "0"
+    command:
+      [
+        "celery",
+        "-A",
+        "app.worker.celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=2",
+      ]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Beat writes the periodic schedule to Redis and dispatches to the worker.
+  # Run exactly one beat process: two would duplicate every scheduled task.
+  beat:
+    build: .
+    env_file: .env
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "0"
+    command:
+      ["celery", "-A", "app.worker.celery_app", "beat", "--loglevel=INFO"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
